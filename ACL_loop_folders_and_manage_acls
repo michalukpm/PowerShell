@@ -1,0 +1,326 @@
+
+#############################################################################################################################################
+#############################################################################################################################################
+#set, initialize parameters and variables
+#############################################################################################################################################
+#############################################################################################################################################
+
+$app_root=""
+$log_timestamp=Get-Date -Format "yyyy_MM_dd_HHmmss"
+$defaultPathOnS = "XXXX"
+$logfile="$app_root\...._LOG_$log_timestamp.log"
+#$logfile="$app_root\logs\SecureSdrive_log.log"
+#$sasadgroup="RS_P_NBB_AP_SASPublish-$tst_filer*"
+$sasadgroup_root="*SAS*"
+$sasadgroup_list="*_$log_timestamp.txt" 
+
+$sasadgroup_pattern="*$sasadgroup_root*[R|W]".ToUpper()
+$sasadgroup_pattern_r="*$sasadgroup_root*R".ToUpper()
+$sasadgroup_pattern_w="*$sasadgroup_root*W".ToUpper()
+
+
+$acl_settings_pre="$app_root\snapshots\SecureSdrive_PERM_SNAP_$log_timestamp.txt" 
+#$acl_settings_post="$app_root\snapshots\SecureSdrive_setting_post_$log_timestamp.csv"
+
+#############################################################################################################################################
+#############################################################################################################################################
+#  reset or prepare output files
+#############################################################################################################################################
+#############################################################################################################################################
+
+#Initiate folder to AD_LIST  healthcheck
+Add-Content -Path $sasadgroup_list -Value "FOLDER_NAME;AD_GROUP_NAME;STATUS;NO_OF_SAS_GROUPS" 
+
+#Initiate log file
+$time = Get-Date -Format "dd/MM/yyyy HH:mm:ss"
+Add-Content -Path $logfile -Value "$time Processing starts"
+
+#Initiate pre snapshot
+Add-Content -Path $acl_settings_pre -Value "FOLDER_NAME;AD_GROUP_NAME;CONTROL_TYPE;PERMISSIONS;NO_OF_GROUPS;VALID"
+
+#Clean log file - test
+#Clear-Content $logfile
+
+#############################################################################################################################################
+#############################################################################################################################################
+#############################################################################################################################################
+#############################################################################################################################################
+#
+#           PART1 - FOR EACH FOLDER QUERY AD AND RETURN A RESULT TO THE AD STATUS FILE 
+#
+#############################################################################################################################################
+#############################################################################################################################################
+#############################################################################################################################################
+#############################################################################################################################################
+
+
+
+#############################################################################################################################################
+#############################################################################################################################################
+# Validate if exactly two groups (RS_P_NBB_AP_SASPublish-XX_R and RS_P_NBB_AP_SASPublish-XX_W) are found in the AD per S drive subfolder
+# If yes - print OK to the status output file, otherwise print ERROR to the status output file 
+# Every time this script is run , a new status file is generated with a timestamp.
+#############################################################################################################################################
+#############################################################################################################################################
+
+# Get list of S drive subfolders
+$folder_list=Get-ChildItem -Path "$defaultPathOnS" -Directory  | Select-Object Name
+
+
+#loop1 - iterate over S drive subfolders, subfolders are stored in folder_list array
+$folder_list | ForEach-Object {
+
+	#get folder name
+	$tmp_folder_item="$($_.Name)"
+	#get first part of a folder name, delimiter '-',effective only for the ETL-p folder in production
+	$tmp_folder_item_filter=("$($_.Name)").Split("-")[0]
+	
+	#write-output $tmp_folder_item	
+	#create a filter that will be applied to AD
+	$tmp_filter="$sasadgroup_root-$tmp_folder_item_filter*"
+	
+	#query ad
+	$tmp_ad_groups=@(Get-ADGroup -Filter {Name -like $tmp_filter} -SearchBase "OU=SRV,OU=Standard,OU=Resource Groups,OU=Administration,DC=NBB,DC=LOCAL" | select -property SamAccountName)
+	#count number of ad groups found based on a folder name and the prefix sasadgroup_root
+	$tmp_ad_groups_cnt=$tmp_ad_groups.Count
+	
+	#print error to the health check report if no ad groups have been found
+	if ($tmp_ad_groups_cnt -eq 0) {
+		    Add-Content -Path $sasadgroup_list -Value "$tmp_folder_item;NOT_FOUND;ERROR;$tmp_ad_groups_cnt"
+			
+			#$time = Get-Date -Format "dd/MM/yyyy HH:mm:ss"
+			#Add-Content -Path $logfile -Value "$time Error: missing AD groups for $tmp_folder_item"
+	}	
+	else {
+		#loop2 - iterate over AD groups found for an S drive folder
+		$tmp_ad_groups | ForEach-Object {
+			#check if exactly two groups were found for a folder, if so assign status OK
+			if ($tmp_ad_groups_cnt -eq 2) {
+			Add-Content -Path $sasadgroup_list -Value "$tmp_folder_item;$($_.SamAccountName);OK;$tmp_ad_groups_cnt" 
+			}
+			#if ad groups were found, but not exactly two, error is printed to the health check report
+			else {
+			Add-Content -Path $sasadgroup_list -Value "$tmp_folder_item;$($_.SamAccountName);ERROR;$tmp_ad_groups_cnt" 
+			
+			#$time = Get-Date -Format "dd/MM/yyyy HH:mm:ss"
+			#Add-Content -Path $logfile -Value "$time Error: incorrect AD group set-up for $tmp_folder_item"			
+			
+			}
+		}
+	}
+}
+
+#############################################################################################################################################
+#############################################################################################################################################
+#############################################################################################################################################
+#############################################################################################################################################
+#
+#           PART2 - BUILD A SNAPSHOT OF CURRECT ACCESS RIGHTS ON S DRIVE LEV1 SUBFOLDERS
+#
+#############################################################################################################################################
+#############################################################################################################################################
+#############################################################################################################################################
+#############################################################################################################################################
+
+
+
+#############################################################################################################################################
+#############################################################################################################################################
+# Validate if proper AD access groups are assigned to level2 S drive folders 
+# If yes - print OK to the status output file, otherwise print ERROR to the status output file 
+# Every time this script is run , a new status file is generated with a timestamp. 
+#############################################################################################################################################
+#############################################################################################################################################
+
+$folder_list | ForEach-Object {
+
+	#get folder name
+	$tmp_folder_item="$($_.Name)"
+	#get first part of a folder name, delimiter '-',effective only for the ETL-p folder in production
+	$tmp_folder_item_filter=("$($_.Name)").Split("-")[0]
+	
+
+
+	$acl = @((Get-Acl -Path "$defaultPathOnS\$tmp_folder_item").Access)
+	$acl_cnt=$acl.Count
+	$acl | ForEach-Object {
+			
+		#Write-Host "$tmp_folder_item;$($_.IdentityReference);$($_.AccessControlType);$($_.FileSystemRights);$acl_cnt"	
+		
+		$tmp_acl=$($_.IdentityReference).ToString().ToUpper()
+		#write-host $tmp_acl
+		
+		
+
+		$sasadgroup_rights="$($_.FileSystemRights)".ToUpper()
+		
+		#write-host $sasadgroup_pattern
+		
+		#validate access rights - groups and persmissions assigned to this ad groups
+		if ($tmp_acl -like $sasadgroup_pattern) {
+			
+			if ($tmp_acl -like $sasadgroup_pattern_r -and $sasadgroup_rights -eq 'READANDEXECUTE, SYNCHRONIZE') {
+			Add-Content -Path $acl_settings_pre -Value "$tmp_folder_item;$($_.IdentityReference);$($_.AccessControlType);$($_.FileSystemRights);$acl_cnt;OK"
+			}
+			elseif ($tmp_acl -like $sasadgroup_pattern_w -and $sasadgroup_rights -eq 'MODIFY, SYNCHRONIZE') {
+			Add-Content -Path $acl_settings_pre -Value "$tmp_folder_item;$($_.IdentityReference);$($_.AccessControlType);$($_.FileSystemRights);$acl_cnt;OK"
+			}
+			else {
+			Add-Content -Path $acl_settings_pre -Value "$tmp_folder_item;$($_.IdentityReference);$($_.AccessControlType);$($_.FileSystemRights);$acl_cnt;ERROR"	
+			}
+		}
+		elseif ($tmp_acl -in @('NT AUTHORITY\SYSTEM','BUILTIN\ADMINISTRATORS','NBBLOCAL\SY_FILE_WRITE', 'NBBLOCAL\SY_FILE_READ', 'NBBLOCAL\SY_FILE_AUDIT', 'NBBLOCAL\SY_FILE_FULL','NBBLOCAL\SY_FILE_SECURITY')) {
+			Add-Content -Path $acl_settings_pre -Value "$tmp_folder_item;$($_.IdentityReference);$($_.AccessControlType);$($_.FileSystemRights);$acl_cnt;OK"
+		}
+		else {
+			Add-Content -Path $acl_settings_pre -Value "$tmp_folder_item;$($_.IdentityReference);$($_.AccessControlType);$($_.FileSystemRights);$acl_cnt;ERROR"	
+		}
+		
+	}
+
+}
+
+#############################################################################################################################################
+#############################################################################################################################################
+#############################################################################################################################################
+#############################################################################################################################################
+#
+#           PART3 - ADD RS_P_NBB_AP_SASPublish* RIGHTS TO S SUBFOLDERS
+#
+#############################################################################################################################################
+#############################################################################################################################################
+#############################################################################################################################################
+#############################################################################################################################################
+
+
+#############################################################################################################################################
+# LOOP OVER FOLDERS, CHECK IF THE FOLDERS HAVE PROPER RS_P_NBB_AP_SASPublish RIGHTS. IF YES, DO NOTHING.IF NO, ADD RS_P_NBB_AP_SASPublish
+# NOTE: THE PROGRAM BELOW DO NOT REMOVE ANY RIGHTS. IT ONLY MAY ADD RS_P_NBB_AP_SASPublish, IF THEY ARE MISSING
+#############################################################################################################################################
+
+#start a log
+$time = Get-Date -Format "dd/MM/yyyy HH:mm:ss"
+Add-Content -Path $logfile -Value "$time NOTE: Validation of AD groups for S-drive commencing"
+
+#loop1 - iterate over S drive subfolders, subfolders are stored in folder_list array
+$folder_list | ForEach-Object {
+
+	#get subfolder name
+	$tmp_folder_item="$($_.Name)"
+	#get first part of a folder name, delimiter '-',effective only for the ETL-p folder in production
+	$tmp_folder_item_filter=("$($_.Name)").Split("-")[0]
+	#full folder path
+	$full_folder_path="$defaultPathOnS$tmp_folder_item"
+	
+		
+	#create a filter that will be applied to AD
+	$tmp_filter="$sasadgroup_root-$tmp_folder_item_filter*"
+	#query ad using $tmp_filter
+	$tmp_ad_groups=@(Get-ADGroup -Filter {Name -like $tmp_filter} -SearchBase "OU=SRV,OU=Standard,OU=Resource Groups,OU=Administration,DC=NBB,DC=LOCAL" | select -property SamAccountName)
+	#count number of ad groups found based on a folder name and the prefix sasadgroup_root
+	$tmp_ad_groups_cnt=$tmp_ad_groups.Count
+	
+	#log number of AD groups per folder, anything different than 2 is an error 
+	$time = Get-Date -Format "dd/MM/yyyy HH:mm:ss" 
+	if ($tmp_ad_groups_cnt -eq 2) {
+	Add-Content -Path $logfile -Value ($time + " NOTE: Correct number of AD groups found for " + $full_folder_path + ", number of groups is " + $tmp_ad_groups_cnt)
+	}
+	else {
+	Add-Content -Path $logfile -Value ($time + " ERROR: Incorrect number of AD groups found for " + $full_folder_path + ", number of groups is " + $tmp_ad_groups_cnt)
+	}
+
+	#if no groups found, log an error 
+	if ($tmp_ad_groups_cnt -eq 0) {
+			
+			$time = Get-Date -Format "dd/MM/yyyy HH:mm:ss"
+			Add-Content -Path $logfile -Value "$time ERROR: missing AD groups for $tmp_folder_item"
+	}	
+	#otherwise loop over AD groups queried from the AD using tmp_filter = "$sasadgroup_root-$tmp_folder_item_filter*"
+	else {
+		#loop2 - iterate over AD groups found for an S drive folder
+		$tmp_ad_groups | ForEach-Object {
+		
+			#initialize if-changed and if-existis controlers 
+			$acl_changed_w=0;
+			$acl_changed_r=0;
+			$acl_exists_w=0;
+			$acl_exists_r=0;
+			#reset ar - new object for access rights that are missing on a folder 
+			$ar = $null
+			
+			#get current acl object 
+			$acl = Get-Acl -path $full_folder_path
+			
+			#START: validate if an access right already exists 
+			$acl_check = @((Get-Acl -path $full_folder_path).Access)
+			
+			$tmp_ad_groups_sas_w=("NBBLOCAL\$sasadgroup_root-$tmp_folder_item_filter" + "_W").ToUpper();
+			$tmp_ad_groups_sas_r=("NBBLOCAL\$sasadgroup_root-$tmp_folder_item_filter" + "_R").ToUpper();
+			
+			$acl_check | ForEach-Object {
+				# Get folder access rights 
+				$acl_check_ad_group="$($_.IdentityReference)".ToUpper()
+				#$acl_check_system_rights="$($_.FileSystemRights)".ToUpper()
+				#check if folder access rights equal to current AD query access right 
+				if ($acl_check_ad_group -eq $tmp_ad_groups_sas_w) {$acl_exists_w=1}
+				elseif ($acl_check_ad_group -eq $tmp_ad_groups_sas_r) {$acl_exists_r=1}
+				#write-host $acl_check_ad_group $tmp_ad_groups_sas_w $tmp_ad_groups_sas_r $acl_exists_w $acl_exists_r
+			}
+			#STOP: validate if an access right already exists  - store that information in acl_exists_w and acl_exists_r
+
+			#get AD group name from AD groups array 
+			$tmp_ad_group_name="NBBLOCAL\$($_.SamAccountName)".ToUpper();
+					
+			# check if an AD group is a write group and if it does not exists -> create a new object $ar with a write permission
+			if ($tmp_ad_group_name -eq $tmp_ad_groups_sas_w -and $acl_exists_w -eq 0) {
+				$ar = New-Object system.security.accesscontrol.filesystemaccessrule($tmp_ad_group_name,"Modify","ContainerInherit,ObjectInherit","None","Allow")
+				$acl_changed_w=1;
+				$time = Get-Date -Format "dd/MM/yyyy HH:mm:ss" 
+				Add-Content -Path $logfile -Value ($time + " ACTION: Setting permission Write on folder " + $full_folder_path + " for adgroup " + $tmp_ad_group_name)
+			}
+			# check if an AD group is a read group and if it does not exists -> create a new object $ar with a read permission
+			elseif ($tmp_ad_group_name -eq $tmp_ad_groups_sas_r  -and $acl_exists_r -eq 0) {
+				$ar = New-Object system.security.accesscontrol.filesystemaccessrule($tmp_ad_group_name,"ReadAndExecute","ContainerInherit,ObjectInherit","None","Allow")
+				$acl_changed_r=1;
+				$time = Get-Date -Format "dd/MM/yyyy HH:mm:ss" 
+				Add-Content -Path $logfile -Value ($time + " ACTION: Setting permission Read on folder " + $full_folder_path + " for adgroup " + $tmp_ad_group_name)
+			}
+			elseif ($tmp_ad_group_name -eq $tmp_ad_groups_sas_r  -and $acl_exists_r -eq 1) {
+				$time = Get-Date -Format "dd/MM/yyyy HH:mm:ss" 
+				Add-Content -Path $logfile -Value ($time + " NOTE: Permissions Read on folder " + $full_folder_path + " for adgroup " + $tmp_ad_group_name + " already exists")
+			}		
+			elseif ($tmp_ad_group_name -eq $tmp_ad_groups_sas_w  -and $acl_exists_w -eq 1) {
+				$time = Get-Date -Format "dd/MM/yyyy HH:mm:ss" 
+				Add-Content -Path $logfile -Value ($time + " NOTE: Permissions Write on folder " + $full_folder_path + " for adgroup " + $tmp_ad_group_name + " already exists")
+			}				
+			
+			#if $ar object contains either read or write permission object, change folder permissions
+			if ($acl_changed_w -eq 1 -or $acl_changed_r -eq 1) {
+			$acl.SetAccessRule($ar)
+			Set-Acl $full_folder_path $acl
+				#error handling - if set-acl command returns error, then it is logged to the execution log
+				if ($?) {
+				$time = Get-Date -Format "dd/MM/yyyy HH:mm:ss"
+				Add-Content -Path $logfile -Value ($time + " ACTION: Permissions created successfully on folder " + $full_folder_path + " for adgroup " + $tmp_ad_group_name )
+				}
+				else {
+				$time = Get-Date -Format "dd/MM/yyyy HH:mm:ss"
+				Add-Content -Path $logfile -Value ($time + " ERROR: Permissions failed to create on folder " + $full_folder_path + " for adgroup " + $tmp_ad_group_name )	
+				}
+			}
+		}
+	}
+}
+
+
+$time = Get-Date -Format "dd/MM/yyyy HH:mm:ss"
+Add-Content -Path $logfile -Value "$time Processing stops"
+
+
+
+
+#############################################################################################################################################
+#############################################################################################################################################
+
+
+
